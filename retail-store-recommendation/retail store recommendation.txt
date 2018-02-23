@@ -1,0 +1,98 @@
+
+Problem: With the retail store data , build a recommendation model and provide product recommendations for
+a few customers. 
+
+sc.setLogLevel("ERROR")
+import org.apache.spark.ml.linalg._
+import org.apache.spark.ml.recommendation._
+import org.apache.spark.ml.Pipeline
+import org.apache.spark.ml.PipelineModel
+import org.apache.spark.ml.feature.{IndexToString, StringIndexer}
+import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.sql.DataFrame
+
+
+
+val retailData = sc.textFile("file:///home/hduser/casestudy2/retail_2013.csv")
+
+retailData.count
+// Get the number of fields in data
+val numfields = retailData.take(1)(0).split(',').length
+//Get distinct products
+val products = retailData.map(line=>line.split(',')(4)).distinct.cache()
+products.foreach(println)
+
+// Create a map from products to their index. This is required to create an int field from products
+
+val productMap = products.zipWithIndex.collect.toMap
+
+//Get the product and custid fields and count
+case class cData(items: Int, custid: Int, cnt: Double)
+
+val countData = retailData.map {x=>
+    val buffer = x.split(',')
+    cData(productMap(buffer(4)).toInt,buffer(6).toInt,1.0)
+}.toDF
+
+// Create a temp view and aggregate the counts for each item and customer
+countData.createOrReplaceTempView("Rating")
+val gData = spark.sql("select items,custid, sum(cnt) as cnt from Rating group by items,custid").cache()
+
+// check few rows 
+gData.show(5)
++-----+------+---+
+|items|custid|cnt|
++-----+------+---+
+|   66| 14506|1.0|
+|  108| 16892|1.0|
+|  102| 13853|2.0|
+|   90| 10859|1.0|
+|   64| 13632|1.0|
++-----+------+---+
+
+// Specify hyper parameters for the model:
+val iterations = 5
+val lambda = 0.01
+val alpha = 1.0
+
+// Create an alternate least squares model
+
+val als = new ALS().setMaxIter(iterations).setRegParam(lambda).setUserCol("custid").setItemCol("items").setRatingCol("cnt").setImplicitPrefs(true).setAlpha(alpha)
+
+
+
+// Fit the model to training data
+val model = als.fit(gData)
+
+
+// create a reverse map for products
+val productReverse = productMap.map(_.swap)
+
+//check recommendation for a user:
+def suggest_5products(user: Int) = {
+    val userDF = productMap.values.map(x=>cData(x.toInt,user,0.0)).toSeq.toDS()
+   val predict = model.transform(userDF)
+   val recommendations = predict.select("items").orderBy(desc("prediction")).head(5)
+    recommendations.map(x=>productReverse(x.getInt(0))).foreach(println)
+   
+}
+
+// test the above function for different users
+
+scala> suggest_5products(43124)
+Kitchen & Dining
+Boots
+Handbags
+Platinum jewelry
+Head Lights
+
+scala> suggest_5products(99970)
+Perfumes
+Kitchen furnishings
+Chocolates & Candies
+Vehicle Power adapters
+Outdoor furniture
+
+
+
+
